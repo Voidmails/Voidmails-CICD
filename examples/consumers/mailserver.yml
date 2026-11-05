@@ -1,0 +1,32 @@
+# Copy to: <mailserver repo>/.github/workflows/ci.yml
+# The mailserver is image-only: no language CI, just build, publish and deploy.
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    permissions:
+      contents: read
+      packages: write
+    uses: your-org/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    with:
+      image-name: your-org/mailserver
+      push: ${{ github.event_name == 'push' }}
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: image
+    uses: your-org/ci-blueprints/.github/workflows/deploy.yml@v1
+    with:
+      service: mailserver
+      image-tag: ${{ needs.image.outputs.image-tag }}
+      environment: production
+      health-timeout: 180
+    secrets: inherit

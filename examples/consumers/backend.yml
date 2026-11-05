@@ -1,0 +1,44 @@
+# Copy to: <backend repo>/.github/workflows/ci.yml
+# Example below is for a Python backend. Change language and commands to match your stack:
+#   node:   install "npm ci",                       test "npm test"
+#   go:     test "go test ./..."                    build "go build ./..."
+#   java:   test "./mvnw -B verify"
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: your-org/ci-blueprints/.github/workflows/backend-ci.yml@v1
+    with:
+      language: python
+      version: "3.12"
+      install-command: "pip install -r requirements.txt"
+      lint-command: "pip install ruff && ruff check ."
+      test-command: "pip install pytest && pytest"
+
+  image:
+    needs: ci
+    permissions:
+      contents: read
+      packages: write
+    uses: your-org/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    with:
+      image-name: your-org/backend
+      push: ${{ github.event_name == 'push' }}
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: image
+    uses: your-org/ci-blueprints/.github/workflows/deploy.yml@v1
+    with:
+      service: backend
+      image-tag: ${{ needs.image.outputs.image-tag }}
+      environment: production
+    secrets: inherit

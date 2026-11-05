@@ -1,0 +1,52 @@
+name: Test templates
+
+# CI for this repository: lint the workflows and run the reusable
+# workflows against the tiny sample projects in examples/.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+
+  node-ci:
+    needs: actionlint
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: examples/node-app
+
+  docker-build:
+    needs: actionlint
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      image-name: ${{ github.repository }}/example
+      context: examples/docker-app
+      dockerfile: examples/docker-app/Dockerfile
+      push: false
+
+  compose-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate server compose file
+        working-directory: servers
+        run: |
+          cp backend.env.example backend.env
+          docker compose --env-file .env.example config --quiet

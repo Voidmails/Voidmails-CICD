@@ -1,0 +1,39 @@
+# Copy to: <frontend repo>/.github/workflows/ci.yml
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: your-org/ci-blueprints/.github/workflows/node-ci.yml@v1
+    with:
+      node-version: "22"
+      # package-manager: pnpm
+      # build-command: "npm run build"
+
+  image:
+    needs: ci
+    permissions:
+      contents: read
+      packages: write
+    uses: your-org/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    with:
+      image-name: your-org/frontend
+      # Pull requests only verify that the image builds
+      push: ${{ github.event_name == 'push' }}
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: image
+    uses: your-org/ci-blueprints/.github/workflows/deploy.yml@v1
+    with:
+      service: frontend
+      image-tag: ${{ needs.image.outputs.image-tag }}
+      environment: production
+    secrets: inherit

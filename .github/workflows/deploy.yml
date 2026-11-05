@@ -1,0 +1,189 @@
+name: Deploy
+
+# Reusable workflow: deploy ONE service to the Hetzner server over SSH.
+#
+# What happens on the server (inside the compose directory):
+#   1. remember the currently deployed tag (from .env)
+#   2. write the new tag to .env  (<SERVICE>_TAG=<tag>)
+#   3. docker compose pull <service> && docker compose up -d --no-deps <service>
+#   4. wait for the container to become healthy
+#   5. on failure: restore the previous tag, restart the service, fail the job
+#
+# Secrets are read from the GitHub Environment named by `environment`.
+# Callers should pass `secrets: inherit` so environment-level secrets are available.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Service name as used in docker-compose.yml (lowercase, e.g. frontend)"
+        type: string
+        required: true
+      image-tag:
+        description: "Image tag to deploy"
+        type: string
+        required: true
+      environment:
+        description: "GitHub Environment (e.g. staging, production)"
+        type: string
+        required: true
+      compose-dir:
+        description: "Directory on the server that holds docker-compose.yml and .env"
+        type: string
+        default: "/opt/app"
+      ssh-port:
+        type: string
+        default: "22"
+      health-timeout:
+        description: "Seconds to wait for the service to become healthy"
+        type: number
+        default: 120
+      runs-on:
+        type: string
+        default: "ubuntu-latest"
+    secrets:
+      DEPLOY_SSH_KEY:
+        description: "Private SSH key of the deploy user"
+        required: false
+      DEPLOY_HOST:
+        description: "Server hostname or IP"
+        required: false
+      DEPLOY_USER:
+        description: "SSH user on the server (e.g. deploy)"
+        required: false
+      DEPLOY_KNOWN_HOSTS:
+        description: "known_hosts line(s) for the server (output of ssh-keyscan, verified)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}-${{ inputs.service }}
+      cancel-in-progress: false
+    steps:
+      - name: Validate inputs and secrets
+        env:
+          SERVICE: ${{ inputs.service }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          COMPOSE_DIR: ${{ inputs.compose-dir }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "Invalid service name: $SERVICE" >&2; exit 1; }
+          [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Invalid image tag: $IMAGE_TAG" >&2; exit 1; }
+          [[ "$COMPOSE_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "Invalid compose-dir: $COMPOSE_DIR" >&2; exit 1; }
+          for name in SSH_KEY HOST DEPLOY_USER KNOWN_HOSTS; do
+            if [ -z "${!name}" ]; then
+              echo "Missing secret for $name. Define DEPLOY_SSH_KEY, DEPLOY_HOST, DEPLOY_USER and DEPLOY_KNOWN_HOSTS in the GitHub Environment and call this workflow with 'secrets: inherit'." >&2
+              exit 1
+            fi
+          done
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Write remote deploy script
+        run: |
+          cat > deploy-remote.sh <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          SERVICE="$1"
+          TAG="$2"
+          DIR="$3"
+          TIMEOUT="$4"
+
+          cd "$DIR"
+          touch .env
+          VAR="$(printf '%s' "$SERVICE" | tr 'a-z-' 'A-Z_')_TAG"
+          PREV="$(grep -E "^${VAR}=" .env | tail -n1 | cut -d= -f2- || true)"
+
+          set_tag() {
+            if grep -qE "^${VAR}=" .env; then
+              sed -i "s|^${VAR}=.*|${VAR}=$1|" .env
+            else
+              echo "${VAR}=$1" >> .env
+            fi
+          }
+
+          wait_healthy() {
+            local deadline=$((SECONDS + TIMEOUT)) cid status
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              cid="$(docker compose ps -q "$SERVICE" || true)"
+              if [ -n "$cid" ]; then
+                status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")"
+                case "$status" in
+                  healthy) return 0 ;;
+                  running)
+                    # No healthcheck defined: make sure it stays up for a few seconds
+                    sleep 10
+                    status="$(docker inspect -f '{{.State.Status}}' "$cid")"
+                    [ "$status" = "running" ] && return 0
+                    return 1
+                    ;;
+                  unhealthy|exited|dead) return 1 ;;
+                esac
+              fi
+              sleep 3
+            done
+            return 1
+          }
+
+          echo "Deploying ${SERVICE}: ${PREV:-<none>} -> ${TAG}"
+          set_tag "$TAG"
+          docker compose pull "$SERVICE"
+          docker compose up -d --no-deps "$SERVICE"
+
+          if wait_healthy; then
+            echo "${SERVICE} is healthy on tag ${TAG}"
+            docker image prune -f > /dev/null || true
+            exit 0
+          fi
+
+          echo "::error::${SERVICE} did not become healthy on tag ${TAG}" >&2
+          docker compose logs --tail 50 "$SERVICE" || true
+
+          if [ -n "$PREV" ] && [ "$PREV" != "$TAG" ]; then
+            echo "Rolling back ${SERVICE} to ${PREV}"
+            set_tag "$PREV"
+            docker compose up -d --no-deps "$SERVICE"
+            echo "Rolled back to ${PREV}"
+          else
+            echo "No previous tag recorded, nothing to roll back to"
+          fi
+          exit 1
+          REMOTE_SCRIPT
+
+      - name: Deploy over SSH
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ inputs.ssh-port }}
+          SERVICE: ${{ inputs.service }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          COMPOSE_DIR: ${{ inputs.compose-dir }}
+          HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" \
+            -o StrictHostKeyChecking=yes -o BatchMode=yes -o IdentitiesOnly=yes \
+            "${DEPLOY_USER}@${HOST}" \
+            bash -s -- "$SERVICE" "$IMAGE_TAG" "$COMPOSE_DIR" "$HEALTH_TIMEOUT" \
+            < deploy-remote.sh
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy

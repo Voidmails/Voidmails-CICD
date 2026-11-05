@@ -1,0 +1,86 @@
+name: Node CI
+
+# Reusable workflow: install, lint, test and build a Node project.
+# Used by: Frontend, Landing Page (and the backend if it is a Node project).
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+      working-directory:
+        type: string
+        default: "."
+      package-manager:
+        description: "npm, pnpm or yarn"
+        type: string
+        default: "npm"
+      lint-command:
+        description: "Empty string skips the step"
+        type: string
+        default: "npm run lint --if-present"
+      test-command:
+        description: "Empty string skips the step"
+        type: string
+        default: "npm test --if-present"
+      build-command:
+        description: "Empty string skips the step"
+        type: string
+        default: "npm run build --if-present"
+      runs-on:
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable pnpm
+        if: inputs.package-manager == 'pnpm'
+        run: corepack enable pnpm
+
+      - name: Enable yarn
+        if: inputs.package-manager == 'yarn'
+        run: corepack enable yarn
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.working-directory }}/*lock*
+
+      - name: Install dependencies
+        env:
+          PM: ${{ inputs.package-manager }}
+        run: |
+          case "$PM" in
+            npm) npm ci ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            *) echo "Unsupported package manager: $PM" >&2; exit 1 ;;
+          esac
+
+      - name: Lint
+        if: inputs.lint-command != ''
+        run: ${{ inputs.lint-command }}
+
+      - name: Test
+        if: inputs.test-command != ''
+        run: ${{ inputs.test-command }}
+
+      - name: Build
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}

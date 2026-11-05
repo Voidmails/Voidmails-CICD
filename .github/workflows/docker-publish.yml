@@ -1,0 +1,109 @@
+name: Docker publish
+
+# Reusable workflow: build a Docker image and push it to GHCR.
+# Tags: the first 12 characters of the commit SHA, plus "latest" on the default branch.
+# Set `push: false` to only verify that the image builds (for pull requests).
+#
+# The calling job must grant:  permissions: { contents: read, packages: write }
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name without registry, e.g. your-org/frontend (lowercased automatically)"
+        type: string
+        required: true
+      context:
+        type: string
+        default: "."
+      dockerfile:
+        description: "Path to the Dockerfile, relative to the repo root"
+        type: string
+        default: "Dockerfile"
+      platforms:
+        type: string
+        default: "linux/amd64"
+      build-args:
+        description: "Newline-separated KEY=VALUE pairs"
+        type: string
+        default: ""
+      push:
+        type: boolean
+        default: true
+      runs-on:
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        type: number
+        default: 30
+    outputs:
+      image-tag:
+        description: "Tag to deploy (short commit SHA)"
+        value: ${{ jobs.publish.outputs.image-tag }}
+      image-ref:
+        description: "Full image reference including the tag"
+        value: ${{ jobs.publish.outputs.image-ref }}
+      digest:
+        description: "Image digest (empty when push is false)"
+        value: ${{ jobs.publish.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+      image-ref: ${{ steps.meta.outputs.ref }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image name and tags
+        id: meta
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          name="ghcr.io/${IMAGE_NAME,,}"
+          tag="${GITHUB_SHA::12}"
+          tags="${name}:${tag}"
+          if [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ]; then
+            tags="${tags}"$'\n'"${name}:latest"
+          fi
+          {
+            echo "tag=${tag}"
+            echo "ref=${name}:${tag}"
+            echo "tags<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ inputs.build-args }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

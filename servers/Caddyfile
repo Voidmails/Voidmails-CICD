@@ -1,0 +1,18 @@
+# Replace the example domains. Caddy obtains and renews HTTPS certificates automatically.
+# Point the DNS A/AAAA records of each domain at the server before starting Caddy.
+
+{
+	email you@example.com
+}
+
+example.com, www.example.com {
+	reverse_proxy landing:80
+}
+
+app.example.com {
+	reverse_proxy frontend:80
+}
+
+api.example.com {
+	reverse_proxy backend:8080
+}

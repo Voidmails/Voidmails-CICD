@@ -1,0 +1,98 @@
+name: Backend CI
+
+# Reusable workflow: set up a language toolchain, then run your own
+# install / lint / test / build commands. Every command is optional.
+# Supported languages: node, python, go, java.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "node, python, go or java"
+        type: string
+        required: true
+      version:
+        description: "Runtime version. Empty uses a sensible default (node 22, python 3.12, go stable, java 21)"
+        type: string
+        default: ""
+      working-directory:
+        type: string
+        default: "."
+      install-command:
+        type: string
+        default: ""
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+      runs-on:
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Check language
+        env:
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          case "$LANGUAGE" in
+            node|python|go|java) ;;
+            *) echo "Unsupported language: $LANGUAGE (use node, python, go or java)" >&2; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        if: inputs.language == 'node'
+        with:
+          node-version: ${{ inputs.version || '22' }}
+
+      - uses: actions/setup-python@v5
+        if: inputs.language == 'python'
+        with:
+          python-version: ${{ inputs.version || '3.12' }}
+
+      - uses: actions/setup-go@v5
+        if: inputs.language == 'go'
+        with:
+          go-version: ${{ inputs.version || 'stable' }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - uses: actions/setup-java@v4
+        if: inputs.language == 'java'
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.version || '21' }}
+
+      - name: Install
+        if: inputs.install-command != ''
+        run: ${{ inputs.install-command }}
+
+      - name: Lint
+        if: inputs.lint-command != ''
+        run: ${{ inputs.lint-command }}
+
+      - name: Test
+        if: inputs.test-command != ''
+        run: ${{ inputs.test-command }}
+
+      - name: Build
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}

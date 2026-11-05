@@ -1,0 +1,80 @@
+# Lives on the server at /opt/app/docker-compose.yml (next to a .env file).
+# The deploy workflow writes <SERVICE>_TAG=<tag> into .env, so every service
+# keeps its own version. Adjust healthchecks and ports to match your images.
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web]
+
+  frontend:
+    image: ghcr.io/your-org/frontend:${FRONTEND_TAG:-latest}
+    restart: unless-stopped
+    networks: [web]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  landing:
+    image: ghcr.io/your-org/landing:${LANDING_TAG:-latest}
+    restart: unless-stopped
+    networks: [web]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    image: ghcr.io/your-org/backend:${BACKEND_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./backend.env]
+    networks: [web]
+    healthcheck:
+      # Adapt the port and path to your backend (and make sure wget/curl exists in the image)
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mailserver:
+    image: ghcr.io/your-org/mailserver:${MAILSERVER_TAG:-latest}
+    restart: unless-stopped
+    hostname: mail.example.com
+    ports:
+      - "25:25"
+      - "465:465"
+      - "587:587"
+      - "993:993"
+    volumes:
+      - mail_data:/var/mail
+    networks: [web]
+    healthcheck:
+      # Adapt to your mailserver image
+      test: ["CMD-SHELL", "nc -z localhost 25 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+networks:
+  web:
+
+volumes:
+  caddy_data:
+  caddy_config:
+  mail_data:
